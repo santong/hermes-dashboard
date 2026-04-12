@@ -43,8 +43,8 @@ import { cn } from "@/lib/utils";
 
 const navItems = [
   { href: "/", label: "会话", icon: MessageSquare, description: "聊天工作台" },
-  { href: "/skills", label: "技能", icon: FileCode2, description: "Skills 管理" },
-  { href: "/memory", label: "记忆", icon: Database, description: "Memory 管理" },
+  { href: "/skills", label: "技能", icon: FileCode2, description: "技能管理" },
+  { href: "/memory", label: "记忆", icon: Database, description: "记忆管理" },
 ] as const;
 
 const roleTone: Record<SessionMessage["role"], string> = {
@@ -104,7 +104,7 @@ function lineDiffPreview(original: string, draft: string) {
     if (changes.length >= 80) break;
   }
 
-  return changes.length ? changes.join("\n") : "No changes";
+  return changes.length ? changes.join("\n") : "暂无变更";
 }
 
 function sessionFilterMatch(session: SessionSummary, filter: SessionFilter) {
@@ -142,6 +142,21 @@ function SectionLabel({ icon: Icon, title, description }: { icon: typeof Sparkle
   );
 }
 
+function getSessionSourceMark(source: string) {
+  const value = source.trim().toLowerCase();
+  if (value.includes("weixin") || value.includes("wechat")) return { label: "微", tone: "bg-emerald-500/12 text-emerald-700 ring-emerald-500/15" };
+  if (value.includes("telegram")) return { label: "TG", tone: "bg-sky-500/12 text-sky-700 ring-sky-500/15" };
+  if (value.includes("discord")) return { label: "DC", tone: "bg-indigo-500/12 text-indigo-700 ring-indigo-500/15" };
+  if (value.includes("slack")) return { label: "SL", tone: "bg-fuchsia-500/12 text-fuchsia-700 ring-fuchsia-500/15" };
+  if (value.includes("whatsapp")) return { label: "WA", tone: "bg-green-500/12 text-green-700 ring-green-500/15" };
+  if (value.includes("signal")) return { label: "SI", tone: "bg-cyan-500/12 text-cyan-700 ring-cyan-500/15" };
+  if (value.includes("imessage") || value.includes("sms")) return { label: "信", tone: "bg-blue-500/12 text-blue-700 ring-blue-500/15" };
+  if (value.includes("feishu")) return { label: "飞", tone: "bg-sky-500/12 text-sky-700 ring-sky-500/15" };
+  if (value.includes("wecom") || value.includes("work") || value.includes("qywx")) return { label: "企", tone: "bg-teal-500/12 text-teal-700 ring-teal-500/15" };
+  if (value.includes("dingtalk") || value.includes("ding")) return { label: "钉", tone: "bg-orange-500/12 text-orange-700 ring-orange-500/15" };
+  return null;
+}
+
 function EmptyState({ icon: Icon, title, description }: { icon: typeof Sparkles; title: string; description: string }) {
   return (
     <div className="flex min-h-[150px] flex-col items-center justify-center rounded-[24px] border border-dashed border-border/70 bg-muted/20 px-6 py-6 text-center">
@@ -150,6 +165,26 @@ function EmptyState({ icon: Icon, title, description }: { icon: typeof Sparkles;
       </div>
       <div className="mt-3 text-[15px] font-semibold tracking-tight text-foreground">{title}</div>
       <p className="mt-1.5 max-w-md text-sm leading-5 text-muted-foreground/95">{description}</p>
+    </div>
+  );
+}
+
+function FloatingNotice({ kind, message, onClose }: { kind: "success" | "error"; message: string; onClose: () => void }) {
+  return (
+    <div className="fixed top-4 right-4 z-[70] max-w-[420px] animate-in fade-in slide-in-from-top-2">
+      <div
+        className={cn(
+          "flex items-start gap-3 border px-3.5 py-3 shadow-lg backdrop-blur-xl",
+          kind === "success"
+            ? "border-emerald-500/20 bg-white/95 text-emerald-700 ring-1 ring-emerald-500/10"
+            : "border-destructive/20 bg-white/95 text-destructive ring-1 ring-destructive/10"
+        )}
+      >
+        <div className="min-w-0 flex-1 text-sm leading-5">{message}</div>
+        <button type="button" onClick={onClose} className="shrink-0 p-0.5 text-current/70 transition hover:text-current" aria-label="关闭提示">
+          <X className="size-4" />
+        </button>
+      </div>
     </div>
   );
 }
@@ -215,17 +250,17 @@ function MessageCard({ message }: { message: SessionMessage }) {
         </Badge>
         <span>{message.author}</span>
         <span>{message.timestamp}</span>
-        {message.toolName ? <span>tool: {message.toolName}</span> : null}
+        {message.toolName ? <span>工具: {message.toolName}</span> : null}
         {message.tokenCount ? <span>{message.tokenCount} tokens</span> : null}
       </div>
 
       <div className="mt-3 whitespace-pre-wrap break-words text-sm leading-6">
-        {message.content.trim() || <span className="text-muted-foreground">(empty)</span>}
+        {message.content.trim() || <span className="text-muted-foreground">（空内容）</span>}
       </div>
 
       {hasReasoning ? (
         <details className="mt-3 rounded-xl border border-border/70 bg-background/80 p-3">
-          <summary className="cursor-pointer text-sm font-medium">Reasoning summary</summary>
+          <summary className="cursor-pointer text-sm font-medium">推理摘要</summary>
           <ul className="mt-2.5 space-y-1.5 text-sm text-muted-foreground">
             {message.reasoning.map((item, index) => (
               <li key={`${message.id}-reasoning-${index}`} className="rounded-lg bg-muted/60 px-3 py-1.5">
@@ -238,7 +273,7 @@ function MessageCard({ message }: { message: SessionMessage }) {
 
       {hasToolCalls ? (
         <details className="mt-3 rounded-xl border border-border/70 bg-background/80 p-3">
-          <summary className="cursor-pointer text-sm font-medium">Planned tool calls ({message.toolCalls.length})</summary>
+          <summary className="cursor-pointer text-sm font-medium">计划中的工具调用（{message.toolCalls.length}）</summary>
           <div className="mt-2.5 space-y-2.5">
             {message.toolCalls.map((tool) => (
               <div key={tool.id} className="rounded-xl border border-border/70 bg-muted/40 p-2.5">
@@ -261,7 +296,7 @@ function MessageCard({ message }: { message: SessionMessage }) {
 
       {hasRaw ? (
         <details className="mt-4 rounded-xl border border-dashed border-border/70 bg-background/80 p-3">
-          <summary className="cursor-pointer text-sm font-medium">Raw reasoning / tool payloads</summary>
+          <summary className="cursor-pointer text-sm font-medium">原始推理 / 工具载荷</summary>
           <div className="mt-2.5 space-y-2.5">
             {message.rawReasoning ? (
               <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-lg bg-muted/50 p-3 text-xs leading-5">
@@ -409,6 +444,18 @@ export function HermesSessionsPage() {
     return () => window.clearTimeout(timer);
   }, [activeSessionId, traceMessages.length, traceViewMode]);
 
+  useEffect(() => {
+    if (!statusMessage) return;
+    const timer = window.setTimeout(() => setStatusMessage(""), 2400);
+    return () => window.clearTimeout(timer);
+  }, [statusMessage]);
+
+  useEffect(() => {
+    if (!errorMessage) return;
+    const timer = window.setTimeout(() => setErrorMessage(""), 4200);
+    return () => window.clearTimeout(timer);
+  }, [errorMessage]);
+
   async function deleteSession(sessionId: string) {
     setDeletingSessionId(sessionId);
     setErrorMessage("");
@@ -428,13 +475,27 @@ export function HermesSessionsPage() {
     }
   }
 
+  function startNewDraft() {
+    setSelectedSessionId("");
+    setSessionDetail(null);
+    setTraceViewMode("chat");
+    setComposerText("");
+    setErrorMessage("");
+    setStatusMessage("已进入新会话草稿。输入消息后点击发送即可创建。");
+  }
+
   async function submitChat(mode: "new" | "reply") {
     const prompt = composerText.trim();
-    if (!prompt) return;
+    if (!prompt) {
+      if (mode === "new") {
+        startNewDraft();
+      }
+      return;
+    }
 
     setSendingChat(true);
     setErrorMessage("");
-    setStatusMessage(mode === "new" ? "正在创建新 session..." : "正在继续当前 session...");
+    setStatusMessage(mode === "new" ? "正在创建新会话..." : "正在继续当前会话...");
 
     try {
       const payload = { prompt, sessionId: mode === "reply" ? selectedSessionId : undefined };
@@ -446,9 +507,9 @@ export function HermesSessionsPage() {
       setSelectedSessionId(result.sessionId);
       setSessionDetail(result.session);
       await loadSessions(result.sessionId);
-      setStatusMessage(mode === "new" ? "新 session 已创建。" : "当前 session 已继续。");
+      setStatusMessage(mode === "new" ? "新会话已创建。" : "当前会话已继续。");
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Failed to run Hermes chat");
+      setErrorMessage(error instanceof Error ? error.message : "运行对话失败");
       setStatusMessage("");
     } finally {
       setSendingChat(false);
@@ -457,20 +518,8 @@ export function HermesSessionsPage() {
 
   return (
     <DashboardShell>
-      {(statusMessage || errorMessage) && (
-        <div className="mb-3 space-y-3">
-          {statusMessage ? (
-            <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/8 px-4 py-3 text-sm text-emerald-700">
-              {statusMessage}
-            </div>
-          ) : null}
-          {errorMessage ? (
-            <div className="rounded-2xl border border-destructive/20 bg-destructive/8 px-4 py-3 text-sm text-destructive">
-              {errorMessage}
-            </div>
-          ) : null}
-        </div>
-      )}
+      {statusMessage ? <FloatingNotice kind="success" message={statusMessage} onClose={() => setStatusMessage("")} /> : null}
+      {errorMessage ? <FloatingNotice kind="error" message={errorMessage} onClose={() => setErrorMessage("")} /> : null}
 
       <div className="grid gap-5 xl:grid-cols-[320px_minmax(0,1fr)] xl:items-start">
         <Card className="border-white/70 bg-white/85 xl:sticky xl:top-6 xl:h-[calc(100vh-8rem)]">
@@ -481,7 +530,7 @@ export function HermesSessionsPage() {
               size="sm"
               className="h-8 shrink-0"
               onClick={() => void submitChat("new")}
-              disabled={sendingChat || !composerText.trim()}
+              disabled={sendingChat}
             >
               {sendingChat ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}新建
             </Button>
@@ -505,6 +554,7 @@ export function HermesSessionsPage() {
                     const expanded = expandedSessionIds.includes(session.id) || children.some((child) => child.id === selectedSessionId);
                     const rootDeleting = deletingSessionId === session.id;
                     const rootConfirming = confirmingDeleteSessionId === session.id;
+                    const rootSourceMark = getSessionSourceMark(session.source);
                     return (
                       <div key={session.id} className="group/session space-y-1.5">
                         <div
@@ -530,7 +580,7 @@ export function HermesSessionsPage() {
                             }
                           }}
                           className={cn(
-                            "w-full overflow-hidden rounded-[16px] border px-2.5 py-2 text-left transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/30",
+                            "w-full overflow-hidden border px-1.5 py-1.5 text-left transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/30",
                             selectedSessionId === session.id
                               ? "border-violet-500/30 bg-violet-500/10 shadow-sm ring-1 ring-violet-500/10"
                               : "border-border/60 bg-white/90 hover:border-violet-400/25 hover:bg-muted/20"
@@ -548,14 +598,19 @@ export function HermesSessionsPage() {
                                       : [...current, session.id]
                                   );
                                 }}
-                                className="rounded-md p-0.5 text-muted-foreground/80 hover:bg-muted"
+                                className="rounded-sm p-0.5 text-muted-foreground/80 hover:bg-muted"
                                 aria-label={expanded ? "折叠子会话" : "展开子会话"}
                               >
                                 <ChevronRight className={cn("size-3 transition-transform", expanded ? "rotate-90" : "rotate-0")} />
                               </button>
                             ) : (
-                              <span className="block w-4 shrink-0" />
+                              <span className="block w-3 shrink-0" />
                             )}
+                            {rootSourceMark ? (
+                              <span className={cn("inline-flex h-4 min-w-4 shrink-0 items-center justify-center border text-[9px] font-semibold leading-none ring-1", rootSourceMark.tone)}>
+                                {rootSourceMark.label}
+                              </span>
+                            ) : null}
                             <div className="min-w-0 flex-1 truncate pr-2 text-[12px] font-semibold tracking-tight text-foreground/95">{session.title}</div>
                             <div className="flex shrink-0 items-center gap-1">
                               {!rootConfirming ? (
@@ -567,7 +622,7 @@ export function HermesSessionsPage() {
                                       event.stopPropagation();
                                       setConfirmingDeleteSessionId(session.id);
                                     }}
-                                    className="opacity-0 pointer-events-none rounded-md p-1 text-muted-foreground/70 transition group-hover/session:opacity-100 group-hover/session:pointer-events-auto hover:bg-destructive/10 hover:text-destructive"
+                                    className="pointer-events-none p-0.5 text-muted-foreground/70 opacity-0 transition group-hover/session:pointer-events-auto group-hover/session:opacity-100 hover:bg-destructive/10 hover:text-destructive"
                                     aria-label="删除会话"
                                   >
                                     <Trash2 className="size-3.5" />
@@ -582,7 +637,7 @@ export function HermesSessionsPage() {
                                       void deleteSession(session.id);
                                     }}
                                     disabled={rootDeleting}
-                                    className="rounded-md border border-destructive/25 bg-destructive/8 px-2 py-1 text-[10px] text-destructive transition hover:bg-destructive/12 disabled:opacity-60"
+                                    className="border border-destructive/25 bg-destructive/8 px-1.5 py-0.5 text-[10px] text-destructive transition hover:bg-destructive/12 disabled:opacity-60"
                                   >
                                     {rootDeleting ? "删除中" : "确认删除"}
                                   </button>
@@ -592,7 +647,7 @@ export function HermesSessionsPage() {
                                       event.stopPropagation();
                                       setConfirmingDeleteSessionId(null);
                                     }}
-                                    className="rounded-md p-1 text-muted-foreground/70 transition hover:bg-muted"
+                                    className="p-0.5 text-muted-foreground/70 transition hover:bg-muted"
                                     aria-label="取消删除"
                                   >
                                     <X className="size-3.5" />
@@ -608,25 +663,33 @@ export function HermesSessionsPage() {
                             {children.map((child) => {
                               const childDeleting = deletingSessionId === child.id;
                               const childConfirming = confirmingDeleteSessionId === child.id;
+                              const childSourceMark = getSessionSourceMark(child.source);
                               return (
                                 <div key={child.id} className="group/child relative">
                                   <button
                                     type="button"
                                     onClick={() => setSelectedSessionId(child.id)}
                                     className={cn(
-                                      "relative w-full overflow-hidden rounded-[14px] border px-2.5 py-1.5 text-left transition-all duration-150 before:absolute before:-left-[14px] before:top-1/2 before:h-px before:w-3 before:-translate-y-1/2 before:bg-border/70 before:content-['']",
+                                      "relative w-full overflow-hidden border px-1.5 py-1 text-left transition-all duration-150 before:absolute before:-left-[14px] before:top-1/2 before:h-px before:w-3 before:-translate-y-1/2 before:bg-border/70 before:content-['']",
                                       selectedSessionId === child.id
                                         ? "border-sky-500/25 bg-sky-500/10 shadow-sm ring-1 ring-sky-500/10"
                                         : "border-border/45 bg-muted/20 text-foreground/82 hover:border-sky-400/20 hover:bg-muted/35"
                                     )}
                                   >
                                     <div className="flex items-center justify-between gap-2">
-                                      <div className="min-w-0 flex-1 truncate pr-2 text-[11px] font-normal">{child.title}</div>
+                                      <div className="flex min-w-0 flex-1 items-center gap-1.5 pr-2">
+                                        {childSourceMark ? (
+                                          <span className={cn("inline-flex h-4 min-w-4 shrink-0 items-center justify-center border text-[9px] font-semibold leading-none ring-1", childSourceMark.tone)}>
+                                            {childSourceMark.label}
+                                          </span>
+                                        ) : null}
+                                        <div className="min-w-0 flex-1 truncate text-[11px] font-normal">{child.title}</div>
+                                      </div>
                                       <div className="flex shrink-0 items-center gap-1">
                                         {!childConfirming ? (
                                           <>
                                             <div className="text-[10px] text-muted-foreground/60">{child.updatedAt}</div>
-                                            <span className="opacity-0 pointer-events-none rounded-md p-1 text-muted-foreground/70 transition group-hover/child:opacity-100">
+                                            <span className="pointer-events-none p-0.5 text-muted-foreground/70 opacity-0 transition group-hover/child:opacity-100">
                                               <Trash2 className="size-3.5" />
                                             </span>
                                           </>
@@ -641,13 +704,13 @@ export function HermesSessionsPage() {
                                         event.stopPropagation();
                                         setConfirmingDeleteSessionId(child.id);
                                       }}
-                                      className="absolute top-1/2 right-1 -translate-y-1/2 rounded-md p-1 text-muted-foreground/70 opacity-0 transition group-hover/child:opacity-100 hover:bg-destructive/10 hover:text-destructive"
+                                      className="absolute top-1/2 right-1 -translate-y-1/2 p-0.5 text-muted-foreground/70 opacity-0 transition group-hover/child:opacity-100 hover:bg-destructive/10 hover:text-destructive"
                                       aria-label="删除会话"
                                     >
                                       <Trash2 className="size-3.5" />
                                     </button>
                                   ) : (
-                                    <div className="absolute top-1/2 right-1 flex -translate-y-1/2 items-center gap-1 rounded-md bg-white/95 px-1 py-0.5 shadow-sm ring-1 ring-border/60">
+                                    <div className="absolute top-1/2 right-1 flex -translate-y-1/2 items-center gap-1 bg-white/95 px-1 py-0.5 shadow-sm ring-1 ring-border/60">
                                       <button
                                         type="button"
                                         onClick={(event) => {
@@ -655,7 +718,7 @@ export function HermesSessionsPage() {
                                           void deleteSession(child.id);
                                         }}
                                         disabled={childDeleting}
-                                        className="rounded-md border border-destructive/25 bg-destructive/8 px-2 py-1 text-[10px] text-destructive transition hover:bg-destructive/12 disabled:opacity-60"
+                                        className="border border-destructive/25 bg-destructive/8 px-1.5 py-0.5 text-[10px] text-destructive transition hover:bg-destructive/12 disabled:opacity-60"
                                       >
                                         {childDeleting ? "删除中" : "确认"}
                                       </button>
@@ -665,7 +728,7 @@ export function HermesSessionsPage() {
                                           event.stopPropagation();
                                           setConfirmingDeleteSessionId(null);
                                         }}
-                                        className="rounded-md p-1 text-muted-foreground/70 transition hover:bg-muted"
+                                        className="p-0.5 text-muted-foreground/70 transition hover:bg-muted"
                                         aria-label="取消删除"
                                       >
                                         <X className="size-3.5" />
@@ -688,18 +751,18 @@ export function HermesSessionsPage() {
 
         <div className="flex min-w-0 flex-col gap-3 xl:h-[calc(100vh-8rem)]">
           <Card className="border-white/70 bg-white/85 xl:min-h-0 xl:flex-1">
-            <CardHeader className="gap-1.5 border-b pb-3">
-              <div className="flex flex-col gap-1 lg:flex-row lg:items-center lg:justify-between">
-                <div className="min-w-0">
-                  <CardTitle className="truncate text-[15px] leading-5">{sessionDetail?.title ?? "No session selected"}</CardTitle>
-                  <CardDescription className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] leading-4">
+            <CardHeader className="gap-1 border-b pb-1.5">
+              <div className="grid min-w-0 gap-0.5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center lg:gap-2">
+                <div className="min-w-0 overflow-hidden">
+                  <CardTitle className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-[15px] leading-5">{sessionDetail?.title ?? "未选择会话"}</CardTitle>
+                  <CardDescription className="mt-0 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] leading-4">
                     <span className="inline-flex items-center gap-1"><Clock3 className="size-3" />{sessionDetail?.startedAt ?? "-"}</span>
                     <span className="inline-flex items-center gap-1"><Bot className="size-3" />{sessionDetail?.model ?? "-"}</span>
                     <span className="inline-flex items-center gap-1"><Network className="size-3" />{sessionDetail?.source ?? "-"}</span>
                   </CardDescription>
                 </div>
 
-                <div className="flex flex-wrap gap-1.5">
+                <div className="flex flex-wrap gap-1.5 lg:justify-end">
                   {viewModes.map((mode) => (
                     <button
                       key={mode.id}
@@ -716,11 +779,11 @@ export function HermesSessionsPage() {
                 </div>
               </div>
             </CardHeader>
-            <CardContent className="flex min-h-0 flex-1 flex-col pt-3.5">
+            <CardContent className="flex min-h-0 flex-1 flex-col pt-1.5">
               {loadingSessionDetail ? (
-                  <EmptyState icon={LoaderCircle} title="正在加载会话详情" description="正在构建 transcript、lineage 与 metadata。" />
+                  <EmptyState icon={LoaderCircle} title="正在加载会话详情" description="正在整理对话内容、会话链路与元信息。" />
               ) : !sessionDetail ? (
-                <EmptyState icon={MessageSquare} title="请选择一个会话" description="从左侧挑选一个 session，即可在这里查看 transcript、trace 与上下文。" />
+                <EmptyState icon={MessageSquare} title="请选择一个会话" description="从左侧挑选一个会话，即可在这里查看对话内容、链路与上下文。" />
               ) : traceViewMode === "raw" ? (
                 <ScrollArea className="min-h-0 flex-1 pr-3">
                   <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-2xl border border-border/70 bg-muted/30 p-4 text-xs leading-5">
@@ -741,7 +804,7 @@ export function HermesSessionsPage() {
           </Card>
 
           <Card className="border-white/70 bg-white/85 py-0">
-            <CardContent className="grid gap-2 py-0">
+            <CardContent className="grid gap-2 py-[5px]">
               {sessionDetail ? (
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
                   <span>消息 {sessionDetail.messageCount}</span>
@@ -754,7 +817,7 @@ export function HermesSessionsPage() {
               ) : null}
               <div className="grid gap-2.5 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
                 <Textarea value={composerText} onChange={(e) => setComposerText(e.target.value)} placeholder="输入消息…" className="min-h-20 rounded-[22px] bg-white/70 text-sm leading-5" />
-                <Button className="h-11 rounded-2xl px-4" onClick={() => void submitChat("reply")} disabled={sendingChat || !selectedSessionId}>
+                <Button className="h-11 rounded-2xl px-4" onClick={() => void submitChat(selectedSessionId ? "reply" : "new")} disabled={sendingChat || !composerText.trim()}>
                   {sendingChat ? <LoaderCircle className="size-4 animate-spin" /> : <SendHorizontal className="size-4" />}
                   发送
                 </Button>
@@ -795,6 +858,18 @@ export function HermesSkillsPage() {
     void loadSkills();
   }, [loadSkills]);
 
+  useEffect(() => {
+    if (!statusMessage) return;
+    const timer = window.setTimeout(() => setStatusMessage(""), 2400);
+    return () => window.clearTimeout(timer);
+  }, [statusMessage]);
+
+  useEffect(() => {
+    if (!errorMessage) return;
+    const timer = window.setTimeout(() => setErrorMessage(""), 4200);
+    return () => window.clearTimeout(timer);
+  }, [errorMessage]);
+
   const filteredSkills = useMemo(() => {
     const query = skillQuery.trim().toLowerCase();
     return skills.filter((skill) => !query || [skill.name, skill.category, skill.description, skill.id].join(" ").toLowerCase().includes(query));
@@ -822,12 +897,8 @@ export function HermesSkillsPage() {
 
   return (
     <DashboardShell>
-      {(statusMessage || errorMessage) && (
-        <div className="mb-3 space-y-3">
-          {statusMessage ? <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/8 px-4 py-3 text-sm text-emerald-700">{statusMessage}</div> : null}
-          {errorMessage ? <div className="rounded-2xl border border-destructive/20 bg-destructive/8 px-4 py-3 text-sm text-destructive">{errorMessage}</div> : null}
-        </div>
-      )}
+      {statusMessage ? <FloatingNotice kind="success" message={statusMessage} onClose={() => setStatusMessage("")} /> : null}
+      {errorMessage ? <FloatingNotice kind="error" message={errorMessage} onClose={() => setErrorMessage("")} /> : null}
 
       <div className="grid gap-5 xl:grid-cols-[360px_minmax(0,1fr)] xl:items-start">
         <Card className="border-white/70 bg-white/85 xl:sticky xl:top-6 xl:h-[calc(100vh-8rem)]">
@@ -845,7 +916,7 @@ export function HermesSkillsPage() {
             <ScrollArea className="min-h-0 flex-1 pr-3">
               <div className="space-y-2.5">
                 {loadingSkills ? (
-                  <EmptyState icon={LoaderCircle} title="正在加载技能" description="正在扫描 ~/.hermes/skills 目录并读取 SKILL.md。" />
+                  <EmptyState icon={LoaderCircle} title="正在加载技能" description="正在扫描 ~/.hermes/skills 目录并读取技能文件。" />
                 ) : filteredSkills.map((skill) => (
                   <button
                     key={skill.id}
@@ -909,14 +980,14 @@ export function HermesSkillsPage() {
                     <div className="mb-1.5 font-medium text-foreground">编辑说明</div>
                     <ul className="space-y-1">
                       <li>直接保存回 skill 目录下的 SKILL.md。</li>
-                      <li>frontmatter 摘要来自文件头部，不做额外推断。</li>
+                      <li>文件头摘要直接来自文件本身，不做额外推断。</li>
                       <li>这个页面专门给 skills，用更宽松的编辑区域。</li>
                     </ul>
                   </div>
                 </div>
               </>
             ) : (
-              <EmptyState icon={FileCode2} title="请选择一个技能" description="从左侧选择一个技能开始编辑，右侧会显示完整内容、frontmatter 摘要和差异预览。" />
+              <EmptyState icon={FileCode2} title="请选择一个技能" description="从左侧选择一个技能开始编辑，右侧会显示完整内容、文件头摘要和差异预览。" />
             )}
           </CardContent>
         </Card>
@@ -957,6 +1028,18 @@ export function HermesMemoryPage() {
   useEffect(() => {
     void loadMemories();
   }, [loadMemories]);
+
+  useEffect(() => {
+    if (!statusMessage) return;
+    const timer = window.setTimeout(() => setStatusMessage(""), 2400);
+    return () => window.clearTimeout(timer);
+  }, [statusMessage]);
+
+  useEffect(() => {
+    if (!errorMessage) return;
+    const timer = window.setTimeout(() => setErrorMessage(""), 4200);
+    return () => window.clearTimeout(timer);
+  }, [errorMessage]);
 
   const filteredMemories = useMemo(() => {
     const query = memoryQuery.trim().toLowerCase();
@@ -1022,12 +1105,8 @@ export function HermesMemoryPage() {
 
   return (
     <DashboardShell>
-      {(statusMessage || errorMessage) && (
-        <div className="mb-3 space-y-3">
-          {statusMessage ? <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/8 px-4 py-3 text-sm text-emerald-700">{statusMessage}</div> : null}
-          {errorMessage ? <div className="rounded-2xl border border-destructive/20 bg-destructive/8 px-4 py-3 text-sm text-destructive">{errorMessage}</div> : null}
-        </div>
-      )}
+      {statusMessage ? <FloatingNotice kind="success" message={statusMessage} onClose={() => setStatusMessage("")} /> : null}
+      {errorMessage ? <FloatingNotice kind="error" message={errorMessage} onClose={() => setErrorMessage("")} /> : null}
 
       <div className="grid gap-5 xl:grid-cols-[360px_minmax(0,1fr)] xl:items-start">
         <Card className="border-white/70 bg-white/85 xl:sticky xl:top-6 xl:h-[calc(100vh-8rem)]">
@@ -1066,7 +1145,7 @@ export function HermesMemoryPage() {
                     <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{item.content}</div>
                     <div className="mt-2.5 flex flex-wrap gap-2 text-xs">
                       <Badge variant="secondary" className="rounded-full">{item.scope}</Badge>
-                      <Badge variant="secondary" className="rounded-full">index {item.index}</Badge>
+                      <Badge variant="secondary" className="rounded-full">序号 {item.index}</Badge>
                     </div>
                   </button>
                 ))}
@@ -1081,7 +1160,7 @@ export function HermesMemoryPage() {
               <div className="flex flex-col gap-2 xl:flex-row xl:items-start xl:justify-between">
                 <div className="min-w-0 flex-1">
                   <CardTitle className="text-[15px] leading-5">{selectedMemory.title}</CardTitle>
-                  <CardDescription className="mt-0.5 break-words text-sm leading-5">{selectedMemory.scope} · updated {formatUpdatedAt(selectedMemory.updatedAt)}</CardDescription>
+                  <CardDescription className="mt-0.5 break-words text-sm leading-5">{selectedMemory.scope} · 更新于 {formatUpdatedAt(selectedMemory.updatedAt)}</CardDescription>
                 </div>
                 <div className="flex shrink-0 gap-2 self-start">
                   <Button onClick={() => void saveMemory(selectedMemory)} disabled={savingMemoryId === selectedMemory.id}>
@@ -1112,7 +1191,7 @@ export function HermesMemoryPage() {
                     <ul className="space-y-1">
                       <li>user: 用户画像、偏好、沟通习惯。</li>
                       <li>memory: 环境事实、稳定约定、工具经验。</li>
-                      <li>这个页面目前提供简单直接的 CRUD。</li>
+                      <li>当前页面提供直接的增删改查操作。</li>
                     </ul>
                   </div>
                   <div className="rounded-2xl border border-border/70 p-3">
@@ -1124,7 +1203,7 @@ export function HermesMemoryPage() {
                 </div>
               </>
             ) : (
-              <EmptyState icon={MemoryStick} title="请选择一条记忆" description="选择左侧条目后即可编辑内容，也可以点击左上角的新增按钮创建一条 durable memory。" />
+              <EmptyState icon={MemoryStick} title="请选择一条记忆" description="选择左侧条目后即可编辑内容，也可以点击左上角的新增按钮创建一条长期记忆。" />
             )}
           </CardContent>
         </Card>
@@ -1136,7 +1215,7 @@ export function HermesMemoryPage() {
             <div className="flex items-start justify-between gap-4">
               <div>
                 <div className="text-xl font-semibold tracking-tight">新增记忆</div>
-                <p className="mt-2 text-sm leading-6 text-muted-foreground">将新条目写入 USER.md 或 MEMORY.md，作为 durable memory 保存。</p>
+                <p className="mt-2 text-sm leading-6 text-muted-foreground">将新条目写入 USER.md 或 MEMORY.md，作为长期记忆保存。</p>
               </div>
               <Button variant="outline" size="sm" className="h-8 shrink-0" onClick={() => setIsCreateMemoryOpen(false)}>
                 关闭
