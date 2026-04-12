@@ -3,6 +3,10 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import remarkGfm from "remark-gfm";
 import {
   Bot,
   ChevronRight,
@@ -237,6 +241,55 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
   );
 }
 
+function MarkdownMessage({ content }: { content: string }) {
+  return (
+    <div className="chat-markdown mt-3 text-sm leading-6 text-foreground/95">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a: ({ className, ...props }) => <a className={cn("font-medium text-violet-700 underline underline-offset-4 hover:text-violet-900", className)} target="_blank" rel="noreferrer" {...props} />,
+          p: ({ className, ...props }) => <p className={cn("my-0", className)} {...props} />,
+          ul: ({ className, ...props }) => <ul className={cn("my-2 list-disc pl-5", className)} {...props} />,
+          ol: ({ className, ...props }) => <ol className={cn("my-2 list-decimal pl-5", className)} {...props} />,
+          li: ({ className, ...props }) => <li className={cn("my-1", className)} {...props} />,
+          blockquote: ({ className, ...props }) => <blockquote className={cn("my-3 border-l-3 border-violet-400/70 bg-violet-500/5 px-3 py-2 text-foreground/85", className)} {...props} />,
+          table: ({ className, ...props }) => <div className="my-3 overflow-x-auto"><table className={cn("min-w-full border-collapse text-xs", className)} {...props} /></div>,
+          th: ({ className, ...props }) => <th className={cn("border border-border/70 bg-muted/60 px-2.5 py-2 text-left font-semibold", className)} {...props} />,
+          td: ({ className, ...props }) => <td className={cn("border border-border/60 px-2.5 py-2 align-top", className)} {...props} />,
+          hr: ({ className, ...props }) => <hr className={cn("my-4 border-border/70", className)} {...props} />,
+          code({ className, children, ...props }) {
+            const match = /language-(\w+)/.exec(className || "");
+            const raw = String(children).replace(/\n$/, "");
+            if (match) {
+              return (
+                <div className="my-3 overflow-hidden rounded-xl border border-slate-800/70 bg-slate-950 shadow-sm">
+                  <div className="border-b border-slate-800/80 bg-slate-900/80 px-3 py-1.5 text-[11px] font-medium tracking-wide text-slate-300">{match[1]}</div>
+                  <SyntaxHighlighter
+                    style={oneDark}
+                    language={match[1]}
+                    PreTag="div"
+                    customStyle={{ margin: 0, padding: '14px 16px', background: 'transparent', fontSize: '12px', lineHeight: '1.6' }}
+                    codeTagProps={{ style: { fontFamily: 'var(--font-geist-mono)' } }}
+                  >
+                    {raw}
+                  </SyntaxHighlighter>
+                </div>
+              );
+            }
+            return (
+              <code className="rounded-md border border-border/60 bg-muted/60 px-1.5 py-0.5 font-mono text-[0.9em]" {...props}>
+                {children}
+              </code>
+            );
+          },
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 function MessageCard({ message }: { message: SessionMessage }) {
   const hasReasoning = message.reasoning.length > 0;
   const hasToolCalls = message.toolCalls.length > 0;
@@ -254,9 +307,7 @@ function MessageCard({ message }: { message: SessionMessage }) {
         {message.tokenCount ? <span>{message.tokenCount} tokens</span> : null}
       </div>
 
-      <div className="mt-3 whitespace-pre-wrap break-words text-sm leading-6">
-        {message.content.trim() || <span className="text-muted-foreground">（空内容）</span>}
-      </div>
+      {message.content.trim() ? <MarkdownMessage content={message.content} /> : <div className="mt-3 text-sm text-muted-foreground">（空内容）</div>}
 
       {hasReasoning ? (
         <details className="mt-3 rounded-xl border border-border/70 bg-background/80 p-3">
@@ -377,13 +428,6 @@ export function HermesSessionsPage() {
     if (selectedSessionId) void loadSessionDetail(selectedSessionId);
     else setSessionDetail(null);
   }, [loadSessionDetail, selectedSessionId]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void loadSessions(selectedSessionId);
-    }, 15000);
-    return () => window.clearInterval(timer);
-  }, [loadSessions, selectedSessionId]);
 
   const filteredSessions = useMemo(() => {
     const query = sessionQuery.trim().toLowerCase();
@@ -525,15 +569,20 @@ export function HermesSessionsPage() {
         <Card className="border-white/70 bg-white/85 xl:sticky xl:top-6 xl:h-[calc(100vh-8rem)]">
           <CardHeader className="flex items-start justify-between gap-2 pb-2">
             <SectionLabel icon={FolderTree} title="会话列表" description="" />
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-8 shrink-0"
-              onClick={() => void submitChat("new")}
-              disabled={sendingChat}
-            >
-              {sendingChat ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}新建
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" className="h-8 shrink-0" onClick={() => void loadSessions(selectedSessionId || undefined)} disabled={loadingSessions}>
+                {loadingSessions ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}刷新
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 shrink-0"
+                onClick={() => void submitChat("new")}
+                disabled={sendingChat}
+              >
+                {sendingChat ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}新建
+              </Button>
+            </div>
           </CardHeader>
           <CardContent className="flex min-h-0 flex-1 flex-col gap-2">
             <div className="relative">
