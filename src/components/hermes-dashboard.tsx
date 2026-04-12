@@ -242,28 +242,60 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
 }
 
 function MarkdownMessage({ content }: { content: string }) {
+  const [copiedBlock, setCopiedBlock] = useState<string | null>(null);
+
+  async function copyCode(raw: string) {
+    try {
+      await navigator.clipboard.writeText(raw);
+      setCopiedBlock(raw);
+      window.setTimeout(() => setCopiedBlock((current) => (current === raw ? null : current)), 1400);
+    } catch {
+      setCopiedBlock(null);
+    }
+  }
+
   return (
     <div className="chat-markdown mt-3 text-sm leading-6 text-foreground/95">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          h1: ({ className, ...props }) => <h1 className={cn("mt-5 mb-2 text-[1.4rem] font-semibold tracking-tight text-foreground", className)} {...props} />,
+          h2: ({ className, ...props }) => <h2 className={cn("mt-4 mb-2 text-[1.18rem] font-semibold tracking-tight text-foreground", className)} {...props} />,
+          h3: ({ className, ...props }) => <h3 className={cn("mt-3 mb-1.5 text-[1.04rem] font-semibold tracking-tight text-foreground", className)} {...props} />,
           a: ({ className, ...props }) => <a className={cn("font-medium text-violet-700 underline underline-offset-4 hover:text-violet-900", className)} target="_blank" rel="noreferrer" {...props} />,
           p: ({ className, ...props }) => <p className={cn("my-0", className)} {...props} />,
           ul: ({ className, ...props }) => <ul className={cn("my-2 list-disc pl-5", className)} {...props} />,
           ol: ({ className, ...props }) => <ol className={cn("my-2 list-decimal pl-5", className)} {...props} />,
-          li: ({ className, ...props }) => <li className={cn("my-1", className)} {...props} />,
-          blockquote: ({ className, ...props }) => <blockquote className={cn("my-3 border-l-3 border-violet-400/70 bg-violet-500/5 px-3 py-2 text-foreground/85", className)} {...props} />,
-          table: ({ className, ...props }) => <div className="my-3 overflow-x-auto"><table className={cn("min-w-full border-collapse text-xs", className)} {...props} /></div>,
-          th: ({ className, ...props }) => <th className={cn("border border-border/70 bg-muted/60 px-2.5 py-2 text-left font-semibold", className)} {...props} />,
-          td: ({ className, ...props }) => <td className={cn("border border-border/60 px-2.5 py-2 align-top", className)} {...props} />,
+          li: ({ className, ...props }) => <li className={cn("my-1 marker:text-muted-foreground", className)} {...props} />,
+          input: ({ className, type, checked, ...props }) =>
+            type === "checkbox" ? (
+              <input className={cn("mr-2 size-3.5 rounded-sm border-border/70 accent-violet-600", className)} type="checkbox" checked={checked} readOnly {...props} />
+            ) : (
+              <input className={className} type={type} checked={checked} {...props} />
+            ),
+          blockquote: ({ className, ...props }) => <blockquote className={cn("my-3 border-l-[3px] border-violet-400/70 bg-violet-500/5 px-3 py-2 text-foreground/85", className)} {...props} />,
+          table: ({ className, ...props }) => <div className="my-3 overflow-x-auto rounded-xl border border-border/70"><table className={cn("min-w-full border-collapse text-xs", className)} {...props} /></div>,
+          thead: ({ className, ...props }) => <thead className={cn("bg-muted/55", className)} {...props} />,
+          tr: ({ className, ...props }) => <tr className={cn("transition-colors hover:bg-muted/30", className)} {...props} />,
+          th: ({ className, ...props }) => <th className={cn("border-b border-border/70 px-3 py-2 text-left font-semibold", className)} {...props} />,
+          td: ({ className, ...props }) => <td className={cn("border-t border-border/50 px-3 py-2 align-top", className)} {...props} />,
           hr: ({ className, ...props }) => <hr className={cn("my-4 border-border/70", className)} {...props} />,
           code({ className, children, ...props }) {
             const match = /language-(\w+)/.exec(className || "");
             const raw = String(children).replace(/\n$/, "");
             if (match) {
               return (
-                <div className="my-3 overflow-hidden rounded-xl border border-slate-800/70 bg-slate-950 shadow-sm">
-                  <div className="border-b border-slate-800/80 bg-slate-900/80 px-3 py-1.5 text-[11px] font-medium tracking-wide text-slate-300">{match[1]}</div>
+                <div className="group/code my-3 overflow-hidden rounded-xl border border-slate-800/70 bg-slate-950 shadow-sm">
+                  <div className="flex items-center justify-between border-b border-slate-800/80 bg-slate-900/80 px-3 py-1.5">
+                    <div className="text-[11px] font-medium tracking-wide text-slate-300">{match[1]}</div>
+                    <button
+                      type="button"
+                      onClick={() => void copyCode(raw)}
+                      className="rounded-md border border-slate-700/80 px-2 py-0.5 text-[10px] font-medium text-slate-300 transition hover:border-slate-500 hover:bg-slate-800 hover:text-white"
+                    >
+                      {copiedBlock === raw ? "已复制" : "复制"}
+                    </button>
+                  </div>
                   <SyntaxHighlighter
                     style={oneDark}
                     language={match[1]}
