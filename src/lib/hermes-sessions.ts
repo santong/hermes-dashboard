@@ -1,9 +1,4 @@
-import { execFile } from "node:child_process";
-import os from "node:os";
-import { promisify } from "node:util";
-
 import type {
-  ChatRunResult,
   SessionDetail,
   SessionKind,
   SessionLink,
@@ -11,9 +6,9 @@ import type {
   SessionSummary,
   SessionToolCall,
 } from "@/lib/hermes-types";
+import { getDb } from "@/lib/db";
 
-const execFileAsync = promisify(execFile);
-const DEFAULT_HERMES_HOME = `${os.homedir()}/.hermes`;
+// ─── Internal row type (matches the SQL SELECT) ──────────────────────
 
 type SessionRow = {
   id: string;
@@ -40,13 +35,7 @@ type SessionRow = {
   total_tokens: number | null;
 };
 
-function getHermesHome() {
-  return process.env.HERMES_HOME?.trim() || DEFAULT_HERMES_HOME;
-}
-
-function getStateDbPath() {
-  return `${getHermesHome()}/state.db`;
-}
+// ─── Pure helper functions (unchanged) ────────────────────────────────
 
 function formatTimestamp(value: number | null | undefined) {
   if (!value) return "-";
@@ -108,60 +97,65 @@ function summarizeContent(content: string) {
   return singleLine.length > 180 ? `${singleLine.slice(0, 180)}…` : singleLine;
 }
 
-async function runPythonJson<T>(code: string, args: string[] = []) {
-  const { stdout } = await execFileAsync("python3", ["-c", code, ...args], {
-    maxBuffer: 1024 * 1024 * 20,
-  });
-  return JSON.parse(stdout) as T;
-}
+// ─── SQLite queries (replaced inline Python) ──────────────────────────
 
-async function fetchSessionRows(): Promise<SessionRow[]> {
-  const code = String.raw`
-import json, sqlite3, sys
-conn = sqlite3.connect(sys.argv[1])
-conn.row_factory = sqlite3.Row
-rows = conn.execute("""
-select
-  s.id,
-  s.title,
-  s.source,
-  s.model,
-  s.parent_session_id,
-  s.started_at,
-  coalesce(s.ended_at, s.started_at) as updated_at,
-  s.ended_at,
-  s.end_reason,
-  s.message_count,
-  s.tool_call_count,
-  s.input_tokens,
-  s.output_tokens,
-  s.reasoning_tokens,
-  s.estimated_cost_usd as estimated_cost,
-  s.actual_cost_usd as actual_cost,
-  (
-    select m.content
-    from messages m
-    where m.session_id = s.id
-      and m.role in ('assistant', 'user', 'tool')
-      and length(trim(coalesce(m.content, ''))) > 0
-    order by m.id desc
-    limit 1
-  ) as preview,
-  coalesce(sum(case when m.role = 'user' then 1 else 0 end), 0) as user_msgs,
-  coalesce(sum(case when m.role = 'assistant' then 1 else 0 end), 0) as assistant_msgs,
-  coalesce(sum(case when m.role = 'tool' then 1 else 0 end), 0) as tool_msgs,
-  coalesce(sum(case when m.role = 'system' then 1 else 0 end), 0) as system_msgs,
-  coalesce(sum(coalesce(m.token_count, 0)), 0) as total_tokens
-from sessions s
-left join messages m on m.session_id = s.id
-group by s.id
-order by s.started_at desc
-""").fetchall()
-print(json.dumps([dict(row) for row in rows], ensure_ascii=False))
+const LIST_SESSIONS_SQL = `
+  SELECT
+    s.id,
+    s.title,
+    s.source,
+    s.model,
+    s.parent_session_id,
+    s.started_at,
+    coalesce(s.ended_at, s.started_at) AS updated_at,
+    s.ended_at,
+    s.end_reason,
+    s.message_count,
+    s.tool_call_count,
+    s.input_tokens,
+    s.output_tokens,
+    s.reasoning_tokens,
+    s.estimated_cost_usd AS estimated_cost,
+    s.actual_cost_usd AS actual_cost,
+    (
+      SELECT m.content
+      FROM messages m
+      WHERE m.session_id = s.id
+        AND m.role IN ('assistant', 'user', 'tool')
+        AND length(trim(coalesce(m.content, ''))) > 0
+      ORDER BY m.id DESC
+      LIMIT 1
+    ) AS preview,
+    coalesce(sum(CASE WHEN m.role = 'user' THEN 1 ELSE 0 END), 0)      AS user_msgs,
+    coalesce(sum(CASE WHEN m.role = 'assistant' THEN 1 ELSE 0 END), 0)  AS assistant_msgs,
+    coalesce(sum(CASE WHEN m.role = 'tool' THEN 1 ELSE 0 END), 0)       AS tool_msgs,
+    coalesce(sum(CASE WHEN m.role = 'system' THEN 1 ELSE 0 END), 0)     AS system_msgs,
+    coalesce(sum(coalesce(m.token_count, 0)), 0)                         AS total_tokens
+  FROM sessions s
+  LEFT JOIN messages m ON m.session_id = s.id
+  GROUP BY s.id
+  ORDER BY s.started_at DESC
 `;
 
-  return runPythonJson<SessionRow[]>(code, [getStateDbPath()]);
+const GET_SESSION_SQL = "SELECT * FROM sessions WHERE id = ?";
+const GET_MESSAGES_SQL = "SELECT * FROM messages WHERE session_id = ? ORDER BY id";
+
+const DELETE_TREE_SQL = `
+  WITH RECURSIVE tree(id, depth) AS (
+    SELECT id, 0 FROM sessions WHERE id = ?
+    UNION ALL
+    SELECT s.id, tree.depth + 1
+    FROM sessions s
+    JOIN tree ON s.parent_session_id = tree.id
+  )
+  SELECT id FROM tree ORDER BY depth DESC
+`;
+
+function fetchSessionRows(): SessionRow[] {
+  return getDb().prepare(LIST_SESSIONS_SQL).all() as SessionRow[];
 }
+
+// ─── Normalization logic (unchanged) ──────────────────────────────────
 
 function buildLineage(idsBySession: Map<string, SessionSummary>, startId: string) {
   const lineage: SessionSummary[] = [];
@@ -263,40 +257,30 @@ function normalizeSessionRows(rows: SessionRow[]) {
   return { sessions, idsBySession };
 }
 
+// ─── Public API ───────────────────────────────────────────────────────
+
 export async function listSessions(): Promise<SessionSummary[]> {
-  const rows = await fetchSessionRows();
+  const rows = fetchSessionRows();
   const { sessions } = normalizeSessionRows(rows);
   return sessions;
 }
 
 export async function getSession(sessionId: string): Promise<SessionDetail | null> {
-  const code = String.raw`
-import json, sqlite3, sys
-conn = sqlite3.connect(sys.argv[1])
-conn.row_factory = sqlite3.Row
-session = conn.execute("select * from sessions where id = ?", (sys.argv[2],)).fetchone()
-if not session:
-    print('null')
-    raise SystemExit(0)
-messages = conn.execute("select * from messages where session_id = ? order by id", (sys.argv[2],)).fetchall()
-print(json.dumps({"session": dict(session), "messages": [dict(row) for row in messages]}, ensure_ascii=False))
-`;
+  const db = getDb();
 
-  const [data, rows] = await Promise.all([
-    runPythonJson<{
-      session: Record<string, string | number | null>;
-      messages: Array<Record<string, string | number | null>>;
-    } | null>(code, [getStateDbPath(), sessionId]),
-    fetchSessionRows(),
-  ]);
+  const sessionRow = db.prepare(GET_SESSION_SQL).get(sessionId) as
+    Record<string, string | number | null> | undefined;
+  if (!sessionRow) return null;
 
-  if (!data) return null;
+  const messageRows = db.prepare(GET_MESSAGES_SQL).all(sessionId) as
+    Array<Record<string, string | number | null>>;
 
-  const { sessions, idsBySession } = normalizeSessionRows(rows);
+  const allRows = fetchSessionRows();
+  const { sessions, idsBySession } = normalizeSessionRows(allRows);
   const sessionBase = sessions.find((item) => item.id === sessionId);
   if (!sessionBase) return null;
 
-  const messages: SessionMessage[] = data.messages.map((message) => ({
+  const messages: SessionMessage[] = messageRows.map((message) => ({
     id: String(message.id),
     role: (message.role as SessionMessage["role"]) ?? "assistant",
     author:
@@ -337,69 +321,28 @@ print(json.dumps({"session": dict(session), "messages": [dict(row) for row in me
   };
 }
 
-function sanitizeChatStdout(stdout: string) {
-  const lines = stdout
-    .split(/\r?\n/)
-    .map((line) => line.trimEnd())
-    .filter((line) => line && !line.startsWith("╭─ ⚕ Hermes") && !line.startsWith("╰"));
-  const sessionLine = lines.find((line) => line.startsWith("session_id:"));
-  const sessionId = sessionLine?.split(":")[1]?.trim();
-  const response = lines.filter((line) => !line.startsWith("session_id:")).join("\n").trim();
-  return { sessionId, response };
-}
-
 export async function deleteSessionTree(sessionId: string): Promise<{ deletedIds: string[] }> {
-  const code = String.raw`
-import json, sqlite3, sys
-conn = sqlite3.connect(sys.argv[1])
-conn.row_factory = sqlite3.Row
-rows = conn.execute("""
-with recursive tree(id, depth) as (
-  select id, 0 from sessions where id = ?
-  union all
-  select s.id, tree.depth + 1
-  from sessions s
-  join tree on s.parent_session_id = tree.id
-)
-select id, depth from tree order by depth desc
-""", (sys.argv[2],)).fetchall()
-ids = [str(row["id"]) for row in rows]
-if not ids:
-    print(json.dumps({"deletedIds": []}, ensure_ascii=False))
-    raise SystemExit(0)
-conn.executemany("delete from messages where session_id = ?", [(item,) for item in ids])
-conn.executemany("delete from sessions where id = ?", [(item,) for item in ids])
-conn.commit()
-print(json.dumps({"deletedIds": ids}, ensure_ascii=False))
-`;
+  const db = getDb();
 
-  return runPythonJson<{ deletedIds: string[] }>(code, [getStateDbPath(), sessionId]);
-}
+  const findTree = db.prepare(DELETE_TREE_SQL);
+  const deleteMessages = db.prepare("DELETE FROM messages WHERE session_id = ?");
+  const deleteSessions = db.prepare("DELETE FROM sessions WHERE id = ?");
 
-export async function runChat(prompt: string, sessionId?: string): Promise<ChatRunResult> {
-  const args = ["chat", "-Q", "-q", prompt, "--source", "dashboard"];
-  if (sessionId) {
-    args.push("--resume", sessionId);
-  }
+  // SELECT + DELETE inside a single transaction to avoid orphan window
+  const runDelete = db.transaction((rootId: string) => {
+    const rows = findTree.all(rootId) as Array<{ id: string }>;
+    const ids = rows.map((r) => String(r.id));
 
-  const { stdout, stderr } = await execFileAsync("hermes", args, {
-    maxBuffer: 1024 * 1024 * 20,
-    timeout: 1000 * 60 * 5,
+    if (ids.length === 0) return { deletedIds: [] as string[] };
+
+    for (const id of ids) {
+      deleteMessages.run(id);
+      deleteSessions.run(id);
+    }
+
+    return { deletedIds: ids };
   });
 
-  const parsed = sanitizeChatStdout(`${stdout}\n${stderr}`);
-  if (!parsed.sessionId) {
-    throw new Error("Hermes did not return a session_id");
-  }
-
-  const session = await getSession(parsed.sessionId);
-  if (!session) {
-    throw new Error(`Session ${parsed.sessionId} was created but could not be loaded`);
-  }
-
-  return {
-    sessionId: parsed.sessionId,
-    response: parsed.response,
-    session,
-  };
+  return runDelete(sessionId);
 }
+

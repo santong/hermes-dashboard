@@ -602,6 +602,8 @@ export function HermesSessionsPage() {
   const [loadingSessions, setLoadingSessions] = useState(true);
   const [loadingSessionDetail, setLoadingSessionDetail] = useState(false);
   const [sendingChat, setSendingChat] = useState(false);
+  const [streamingText, setStreamingText] = useState("");
+  const [pendingUserMessage, setPendingUserMessage] = useState("");
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [confirmingDeleteSessionId, setConfirmingDeleteSessionId] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState("");
@@ -755,26 +757,94 @@ export function HermesSessionsPage() {
       return;
     }
 
+    // Immediately: clear composer and show the user's message in the chat area
+    setComposerText("");
+    setPendingUserMessage(prompt);
     setSendingChat(true);
+    setStreamingText("");
     setErrorMessage("");
-    setStatusMessage(locale === "zh" ? (mode === "new" ? "正在创建新会话..." : "正在继续当前会话...") : (mode === "new" ? "Creating a new session..." : "Continuing current session..."));
+    setStatusMessage("");
 
     try {
       const payload = { prompt, sessionId: mode === "reply" ? selectedSessionId : undefined };
-      const result = await getJson<{ sessionId: string; response: string; session: SessionDetail }>("/api/chat", {
+
+      const response = await fetch("/api/chat", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      setComposerText("");
-      setSelectedSessionId(result.sessionId);
-      setSessionDetail(result.session);
-      await loadSessions(result.sessionId);
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(errData.error || "Request failed");
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("No response stream");
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let accumulatedText = "";
+      let resolvedSessionId = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Parse SSE events from the buffer
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+
+        for (const part of parts) {
+          const lines = part.split("\n");
+          let eventType = "";
+          let eventData = "";
+
+          for (const line of lines) {
+            if (line.startsWith("event: ")) eventType = line.slice(7);
+            else if (line.startsWith("data: ")) eventData = line.slice(6);
+          }
+
+          switch (eventType) {
+            case "token":
+              accumulatedText += (accumulatedText ? "\n" : "") + eventData;
+              setStreamingText(accumulatedText);
+              break;
+            case "session_id":
+              resolvedSessionId = eventData;
+              break;
+            case "done": {
+              const doneData = JSON.parse(eventData) as { sessionId: string };
+              resolvedSessionId = doneData.sessionId || resolvedSessionId;
+              break;
+            }
+            case "error":
+              throw new Error(eventData);
+          }
+        }
+      }
+
+      // Stream complete — load the full session detail from DB
+      setStreamingText("");
+      setPendingUserMessage("");
+
+      if (resolvedSessionId) {
+        setSelectedSessionId(resolvedSessionId);
+        const data = await getJson<{ session: SessionDetail }>(`/api/sessions/${resolvedSessionId}`);
+        setSessionDetail(data.session);
+        await loadSessions(resolvedSessionId);
+      }
+
       setStatusMessage(locale === "zh" ? (mode === "new" ? "新会话已创建。" : "当前会话已继续。") : (mode === "new" ? "New session created." : "Current session continued."));
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : (locale === "zh" ? "运行对话失败" : "Failed to run chat"));
       setStatusMessage("");
     } finally {
       setSendingChat(false);
+      setStreamingText("");
+      setPendingUserMessage("");
     }
   }
 
@@ -1063,6 +1133,35 @@ export function HermesSessionsPage() {
                     {traceMessages.map((message) => (
                       <MessageCard key={message.id} message={message} />
                     ))}
+                    {sendingChat && pendingUserMessage && (
+                      <article className="rounded-[20px] border border-sky-500/30 bg-sky-500/8 px-4 py-3.5 shadow-sm">
+                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                          <Badge variant="outline" className="rounded-full capitalize">user</Badge>
+                          <span>You</span>
+                        </div>
+                        <div className="mt-3 whitespace-pre-wrap text-sm leading-6 text-foreground/95">
+                          {pendingUserMessage}
+                        </div>
+                      </article>
+                    )}
+                    {sendingChat && (
+                      <article className="rounded-[20px] border border-violet-500/30 bg-violet-500/8 px-4 py-3.5 shadow-sm">
+                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                          <Badge variant="outline" className="rounded-full capitalize">assistant</Badge>
+                          <span>Hermes</span>
+                        </div>
+                        {streamingText ? (
+                          <div className="mt-3 whitespace-pre-wrap text-sm leading-6 text-foreground/95">
+                            {streamingText}<span className="ml-0.5 animate-pulse text-violet-400">▊</span>
+                          </div>
+                        ) : (
+                          <div className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
+                            <LoaderCircle className="size-3.5 animate-spin" />
+                            <span>{locale === "zh" ? "思考中..." : "Thinking..."}</span>
+                          </div>
+                        )}
+                      </article>
+                    )}
                     <div ref={latestMessageAnchorRef} />
                   </div>
                 </ScrollArea>
