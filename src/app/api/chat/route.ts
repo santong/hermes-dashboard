@@ -13,7 +13,7 @@ export async function POST(request: Request) {
     }
 
     const sessionId = body.sessionId?.trim() || undefined;
-    const handle = createChatStream(prompt, sessionId);
+    const handle = await createChatStream(prompt, sessionId);
 
     const stream = new ReadableStream({
       async start(controller) {
@@ -31,6 +31,9 @@ export async function POST(request: Request) {
                 break;
               case "session_id":
                 send("session_id", event.data);
+                break;
+              case "status":
+                send("status", JSON.stringify({ tool: event.tool, detail: event.detail }));
                 break;
               case "done":
                 send("done", JSON.stringify({ sessionId: event.sessionId }));

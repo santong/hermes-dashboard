@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -420,7 +420,7 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
   );
 }
 
-function MarkdownMessage({ content }: { content: string }) {
+const MarkdownMessage = memo(function MarkdownMessage({ content }: { content: string }) {
   const { t, themeMode } = useUiPrefs();
   const [copiedBlock, setCopiedBlock] = useState<string | null>(null);
 
@@ -500,9 +500,9 @@ function MarkdownMessage({ content }: { content: string }) {
       </ReactMarkdown>
     </div>
   );
-}
+});
 
-function MessageCard({ message }: { message: SessionMessage }) {
+const MessageCard = memo(function MessageCard({ message }: { message: SessionMessage }) {
   const { t, themeMode } = useUiPrefs();
   const hasReasoning = message.reasoning.length > 0;
   const hasToolCalls = message.toolCalls.length > 0;
@@ -586,7 +586,7 @@ function MessageCard({ message }: { message: SessionMessage }) {
       ) : null}
     </article>
   );
-}
+});
 
 export function HermesSessionsPage() {
   const { t, locale, themeMode } = useUiPrefs();
@@ -604,11 +604,17 @@ export function HermesSessionsPage() {
   const [sendingChat, setSendingChat] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [pendingUserMessage, setPendingUserMessage] = useState("");
+  const [toolStatus, setToolStatus] = useState("");
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [confirmingDeleteSessionId, setConfirmingDeleteSessionId] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const latestMessageAnchorRef = useRef<HTMLDivElement | null>(null);
+
+  // ── Composer history (↑/↓ arrow key navigation) ──
+  const composerHistoryRef = useRef<string[]>([]);
+  const composerHistoryIndexRef = useRef(-1);
+  const composerDraftRef = useRef("");
 
   const loadSessions = useCallback(async (preferredSessionId?: string) => {
     setLoadingSessions(true);
@@ -645,8 +651,11 @@ export function HermesSessionsPage() {
   }, [loadSessions]);
 
   useEffect(() => {
+    // Skip auto-reload while submitChat is handling its own session loading.
+    if (sendingChat) return;
     if (selectedSessionId) void loadSessionDetail(selectedSessionId);
     else setSessionDetail(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadSessionDetail, selectedSessionId]);
 
   const filteredSessions = useMemo(() => {
@@ -757,6 +766,14 @@ export function HermesSessionsPage() {
       return;
     }
 
+    // Record to history and reset navigation index
+    const history = composerHistoryRef.current;
+    if (history[history.length - 1] !== prompt) {
+      history.push(prompt);
+    }
+    composerHistoryIndexRef.current = -1;
+    composerDraftRef.current = "";
+
     // Immediately: clear composer and show the user's message in the chat area
     setComposerText("");
     setPendingUserMessage(prompt);
@@ -764,6 +781,9 @@ export function HermesSessionsPage() {
     setStreamingText("");
     setErrorMessage("");
     setStatusMessage("");
+
+    let accumulatedText = "";
+    let resolvedSessionId = "";
 
     try {
       const payload = { prompt, sessionId: mode === "reply" ? selectedSessionId : undefined };
@@ -784,8 +804,7 @@ export function HermesSessionsPage() {
 
       const decoder = new TextDecoder();
       let buffer = "";
-      let accumulatedText = "";
-      let resolvedSessionId = "";
+      let streamError = "";
 
       while (true) {
         const { done, value } = await reader.read();
@@ -793,7 +812,6 @@ export function HermesSessionsPage() {
 
         buffer += decoder.decode(value, { stream: true });
 
-        // Parse SSE events from the buffer
         const parts = buffer.split("\n\n");
         buffer = parts.pop() ?? "";
 
@@ -809,9 +827,15 @@ export function HermesSessionsPage() {
 
           switch (eventType) {
             case "token":
-              accumulatedText += (accumulatedText ? "\n" : "") + eventData;
+              accumulatedText += eventData;
               setStreamingText(accumulatedText);
+              setToolStatus("");
               break;
+            case "status": {
+              const s = JSON.parse(eventData) as { tool: string; detail: string };
+              setToolStatus(`${s.tool}: ${s.detail}`);
+              break;
+            }
             case "session_id":
               resolvedSessionId = eventData;
               break;
@@ -821,30 +845,50 @@ export function HermesSessionsPage() {
               break;
             }
             case "error":
-              throw new Error(eventData);
+              // Don't throw — collect the error and continue reading
+              // (a "done" event may follow with a session_id for partial results).
+              streamError = eventData;
+              break;
           }
         }
       }
 
-      // Stream complete — load the full session detail from DB
-      setStreamingText("");
-      setPendingUserMessage("");
+      // If there was an error, surface it after the stream fully closes.
+      if (streamError) {
+        throw new Error(streamError);
+      }
 
+      // Stream complete — try to load session detail from DB.
+      // Streaming text stays visible until DB data confirmed has messages.
       if (resolvedSessionId) {
-        setSelectedSessionId(resolvedSessionId);
-        const data = await getJson<{ session: SessionDetail }>(`/api/sessions/${resolvedSessionId}`);
-        setSessionDetail(data.session);
-        await loadSessions(resolvedSessionId);
+        try {
+          const data = await getJson<{ session: SessionDetail }>(`/api/sessions/${resolvedSessionId}`);
+          if (data.session?.messages?.length) {
+            setSelectedSessionId(resolvedSessionId);
+            setSessionDetail(data.session);
+            // DB has messages → safe to clear streaming UI
+            setStreamingText("");
+            setPendingUserMessage("");
+          }
+        } catch {
+          // DB load failed — streaming text stays visible as fallback
+        }
+        // Refresh session list (don't await — fire and forget)
+        void loadSessions(resolvedSessionId);
       }
 
       setStatusMessage(locale === "zh" ? (mode === "new" ? "新会话已创建。" : "当前会话已继续。") : (mode === "new" ? "New session created." : "Current session continued."));
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : (locale === "zh" ? "运行对话失败" : "Failed to run chat"));
+      const msg = error instanceof Error ? error.message : (locale === "zh" ? "运行对话失败" : "Failed to run chat");
+      if (accumulatedText) {
+        setStreamingText(accumulatedText + `\n\n---\n**Error:** ${msg}`);
+      } else {
+        setErrorMessage(msg);
+      }
       setStatusMessage("");
     } finally {
       setSendingChat(false);
-      setStreamingText("");
-      setPendingUserMessage("");
+      setToolStatus("");
     }
   }
 
@@ -899,6 +943,8 @@ export function HermesSessionsPage() {
                           tabIndex={0}
                           onClick={() => {
                             setSelectedSessionId(session.id);
+                            setStreamingText("");
+                            setPendingUserMessage("");
                             if (children.length) {
                               setExpandedSessionIds((current) =>
                                 current.includes(session.id) ? current : [...current, session.id]
@@ -1119,9 +1165,9 @@ export function HermesSessionsPage() {
             <CardContent className="flex min-h-0 flex-1 flex-col pt-1.5">
               {loadingSessionDetail ? (
                   <EmptyState icon={LoaderCircle} title={t("loadingSessionDetailTitle")} description={t("loadingSessionDetailDesc")} />
-              ) : !sessionDetail ? (
+              ) : !sessionDetail && !sendingChat ? (
                 <EmptyState icon={MessageSquare} title={t("chooseSessionTitle")} description={t("chooseSessionDesc")} />
-              ) : traceViewMode === "raw" ? (
+              ) : traceViewMode === "raw" && !sendingChat ? (
                 <ScrollArea className="min-h-0 flex-1 pr-3">
                   <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-2xl border border-border/70 bg-muted/30 p-4 text-xs leading-5">
                     {JSON.stringify(sessionDetail, null, 2)}
@@ -1133,7 +1179,7 @@ export function HermesSessionsPage() {
                     {traceMessages.map((message) => (
                       <MessageCard key={message.id} message={message} />
                     ))}
-                    {sendingChat && pendingUserMessage && (
+                    {pendingUserMessage && (
                       <article className="rounded-[20px] border border-sky-500/30 bg-sky-500/8 px-4 py-3.5 shadow-sm">
                         <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
                           <Badge variant="outline" className="rounded-full capitalize">user</Badge>
@@ -1144,7 +1190,7 @@ export function HermesSessionsPage() {
                         </div>
                       </article>
                     )}
-                    {sendingChat && (
+                    {(streamingText || sendingChat) && (
                       <article className="rounded-[20px] border border-violet-500/30 bg-violet-500/8 px-4 py-3.5 shadow-sm">
                         <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
                           <Badge variant="outline" className="rounded-full capitalize">assistant</Badge>
@@ -1152,12 +1198,12 @@ export function HermesSessionsPage() {
                         </div>
                         {streamingText ? (
                           <div className="mt-3 whitespace-pre-wrap text-sm leading-6 text-foreground/95">
-                            {streamingText}<span className="ml-0.5 animate-pulse text-violet-400">▊</span>
+                            {streamingText}{sendingChat && <span className="ml-0.5 animate-pulse text-violet-400">▊</span>}
                           </div>
                         ) : (
                           <div className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
                             <LoaderCircle className="size-3.5 animate-spin" />
-                            <span>{locale === "zh" ? "思考中..." : "Thinking..."}</span>
+                            <span>{toolStatus || (locale === "zh" ? "思考中..." : "Thinking...")}</span>
                           </div>
                         )}
                       </article>
@@ -1182,7 +1228,50 @@ export function HermesSessionsPage() {
                 </div>
               ) : null}
               <div className="grid gap-2.5 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
-                <Textarea value={composerText} onChange={(e) => setComposerText(e.target.value)} placeholder={t("composePlaceholder")} className="min-h-20 rounded-[22px] bg-white/70 text-sm leading-5" />
+                <Textarea
+                  value={composerText}
+                  onChange={(e) => setComposerText(e.target.value)}
+                  onKeyDown={(e) => {
+                    const history = composerHistoryRef.current;
+                    if (history.length === 0) return;
+
+                    if (e.key === "ArrowUp" && !e.shiftKey) {
+                      const el = e.currentTarget;
+                      const beforeCursor = el.value.slice(0, el.selectionStart);
+                      // Only navigate history if cursor is on the first line
+                      if (beforeCursor.includes("\n")) return;
+
+                      e.preventDefault();
+                      const idx = composerHistoryIndexRef.current;
+                      if (idx === -1) {
+                        composerDraftRef.current = composerText;
+                        composerHistoryIndexRef.current = history.length - 1;
+                      } else if (idx > 0) {
+                        composerHistoryIndexRef.current = idx - 1;
+                      }
+                      setComposerText(history[composerHistoryIndexRef.current]);
+                    } else if (e.key === "ArrowDown" && !e.shiftKey) {
+                      const el = e.currentTarget;
+                      const afterCursor = el.value.slice(el.selectionEnd);
+                      // Only navigate history if cursor is on the last line
+                      if (afterCursor.includes("\n")) return;
+
+                      e.preventDefault();
+                      const idx = composerHistoryIndexRef.current;
+                      if (idx === -1) return;
+
+                      if (idx < history.length - 1) {
+                        composerHistoryIndexRef.current = idx + 1;
+                        setComposerText(history[composerHistoryIndexRef.current]);
+                      } else {
+                        composerHistoryIndexRef.current = -1;
+                        setComposerText(composerDraftRef.current);
+                      }
+                    }
+                  }}
+                  placeholder={t("composePlaceholder")}
+                  className="min-h-20 rounded-[22px] bg-white/70 text-sm leading-5"
+                />
                 <Button className="h-11 rounded-2xl px-4" onClick={() => void submitChat(selectedSessionId ? "reply" : "new")} disabled={sendingChat || !composerText.trim()}>
                   {sendingChat ? <LoaderCircle className="size-4 animate-spin" /> : <SendHorizontal className="size-4" />}
                   {t("send")}

@@ -10,10 +10,107 @@ import type { ChatRunResult } from "@/lib/hermes-types";
 export type ChatStreamEvent =
   | { type: "token"; data: string }
   | { type: "session_id"; data: string }
+  | { type: "status"; tool: string; detail: string }
   | { type: "done"; sessionId: string }
   | { type: "error"; message: string };
 
-// ─── Line classification (replaces sanitizeChatStdout) ────────────────
+export type StreamChatHandle = {
+  generator: AsyncGenerator<ChatStreamEvent>;
+  /** Kill the underlying process or abort the fetch. */
+  kill: () => void;
+};
+
+// ─── Sidecar client ───────────────────────────────────────────────────
+
+const SIDECAR_URL = process.env.SIDECAR_URL?.trim() || "http://127.0.0.1:9710";
+
+async function isSidecarUp(): Promise<boolean> {
+  try {
+    const r = await fetch(`${SIDECAR_URL}/health`, {
+      signal: AbortSignal.timeout(500),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+function createSidecarStream(prompt: string, sessionId?: string): StreamChatHandle {
+  const controller = new AbortController();
+
+  async function* generate(): AsyncGenerator<ChatStreamEvent> {
+    const response = await fetch(`${SIDECAR_URL}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, sessionId }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "Sidecar request failed");
+      throw new Error(text);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("No response stream from sidecar");
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+
+        for (const part of parts) {
+          let eventType = "";
+          let eventData = "";
+          for (const line of part.split("\n")) {
+            if (line.startsWith("event: ")) eventType = line.slice(7);
+            else if (line.startsWith("data: ")) eventData = line.slice(6);
+          }
+
+          switch (eventType) {
+            case "token":
+              yield { type: "token", data: eventData };
+              break;
+            case "session_id":
+              yield { type: "session_id", data: eventData };
+              break;
+            case "status": {
+              const s = JSON.parse(eventData) as { tool: string; detail: string };
+              yield { type: "status", tool: s.tool, detail: s.detail };
+              break;
+            }
+            case "done": {
+              const parsed = JSON.parse(eventData) as { sessionId: string };
+              yield { type: "done", sessionId: parsed.sessionId };
+              break;
+            }
+            case "error":
+              yield { type: "error", message: eventData };
+              break;
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  return {
+    generator: generate(),
+    kill() {
+      controller.abort();
+    },
+  };
+}
+
+// ─── CLI fallback (existing spawn logic) ──────────────────────────────
 
 function classifyLine(line: string): { kind: "skip" | "session_id" | "text"; value: string } {
   const trimmed = line.trimEnd();
@@ -26,27 +123,7 @@ function classifyLine(line: string): { kind: "skip" | "session_id" | "text"; val
   return { kind: "text", value: trimmed };
 }
 
-// ─── Streaming chat via AsyncGenerator ────────────────────────────────
-
-export type StreamChatHandle = {
-  generator: AsyncGenerator<ChatStreamEvent>;
-  /** Kill the child process (e.g. when the client disconnects). */
-  kill: () => void;
-};
-
-/**
- * Spawn hermes CLI and return an async generator of SSE events plus a kill handle.
- *
- * The caller MUST call handle.kill() if the consumer disconnects before the
- * stream ends, otherwise the hermes child process will keep running.
- *
- * Protocol:
- *   token      — each chunk of stdout text
- *   session_id — when the session_id line is detected
- *   done       — stream complete, includes session ID
- *   error      — on failure
- */
-export function createChatStream(prompt: string, sessionId?: string): StreamChatHandle {
+function createCliStream(prompt: string, sessionId?: string): StreamChatHandle {
   const args = ["chat", "-Q", "-q", prompt, "--source", "dashboard"];
   if (sessionId) {
     args.push("--resume", sessionId);
@@ -65,21 +142,17 @@ export function createChatStream(prompt: string, sessionId?: string): StreamChat
 
   let detectedSessionId: string | null = null;
   const stderrChunks: string[] = [];
-
-  // Event queue with promise-based signaling for the async generator
   const events: ChatStreamEvent[] = [];
   let notifyReady: (() => void) | null = null;
   let streamDone = false;
 
   function push(event: ChatStreamEvent) {
     events.push(event);
-    // Clear notifyReady BEFORE calling to avoid stale resolver issues
     const fn = notifyReady;
     notifyReady = null;
     fn?.();
   }
 
-  // Buffer for incomplete lines (stdout may chunk mid-line)
   let lineBuffer = "";
 
   child.stdout!.on("data", (chunk: Buffer) => {
@@ -93,7 +166,7 @@ export function createChatStream(prompt: string, sessionId?: string): StreamChat
         detectedSessionId = classified.value;
         push({ type: "session_id", data: classified.value });
       } else if (classified.kind === "text") {
-        push({ type: "token", data: classified.value });
+        push({ type: "token", data: classified.value + "\n" });
       }
     }
   });
@@ -103,7 +176,6 @@ export function createChatStream(prompt: string, sessionId?: string): StreamChat
   });
 
   child.on("close", (code) => {
-    // Flush remaining line buffer
     if (lineBuffer.trim()) {
       const classified = classifyLine(lineBuffer);
       if (classified.kind === "session_id") {
@@ -160,21 +232,33 @@ export function createChatStream(prompt: string, sessionId?: string): StreamChat
   };
 }
 
-// ─── Convenience wrapper for non-streaming use ────────────────────────
+// ─── Public API: sidecar-first with CLI fallback ──────────────────────
+
+/**
+ * Create a chat stream, trying sidecar first, falling back to CLI spawn.
+ *
+ * The caller MUST call handle.kill() on disconnect to clean up resources.
+ */
+export async function createChatStream(prompt: string, sessionId?: string): Promise<StreamChatHandle> {
+  if (await isSidecarUp()) {
+    return createSidecarStream(prompt, sessionId);
+  }
+  return createCliStream(prompt, sessionId);
+}
+
+// ─── Convenience wrappers ─────────────────────────────────────────────
 
 export async function* streamChat(
   prompt: string,
   sessionId?: string,
 ): AsyncGenerator<ChatStreamEvent> {
-  const handle = createChatStream(prompt, sessionId);
+  const handle = await createChatStream(prompt, sessionId);
   try {
     yield* handle.generator;
   } finally {
     handle.kill();
   }
 }
-
-// ─── Non-streaming fallback (consumes streamChat internally) ──────────
 
 export async function runChat(prompt: string, sessionId?: string): Promise<ChatRunResult> {
   let finalSessionId = "";

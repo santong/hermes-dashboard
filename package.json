@@ -3,10 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "bash sidecar/start.sh & next dev",
+    "dev:next": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "sidecar": "bash sidecar/start.sh",
+    "sidecar:stop": "kill $(lsof -ti:9710) 2>/dev/null || true"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",
