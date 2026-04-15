@@ -610,53 +610,57 @@ export function HermesSessionsPage() {
   const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const latestMessageAnchorRef = useRef<HTMLDivElement | null>(null);
+  const submitLockRef = useRef(false);
 
   // ── Composer history (↑/↓ arrow key navigation) ──
   const composerHistoryRef = useRef<string[]>([]);
   const composerHistoryIndexRef = useRef(-1);
   const composerDraftRef = useRef("");
 
-  const loadSessions = useCallback(async (preferredSessionId?: string) => {
-    setLoadingSessions(true);
-    try {
-      const data = await getJson<{ sessions: SessionSummary[] }>("/api/sessions");
-      setSessions(data.sessions);
-      setSelectedSessionId((current) => {
-        const nextId = preferredSessionId ?? current;
-        if (nextId && data.sessions.some((session) => session.id === nextId)) return nextId;
-        return data.sessions[0]?.id ?? "";
-      });
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : (locale === "zh" ? "加载会话失败" : "Failed to load sessions"));
-    } finally {
-      setLoadingSessions(false);
-    }
-  }, [locale]);
+  // ── Session data loading (all explicit, no useEffect auto-loading) ──
 
-  const loadSessionDetail = useCallback(async (sessionId: string) => {
-    if (!sessionId) return;
+  const refreshSessionList = useCallback(async () => {
+    const data = await getJson<{ sessions: SessionSummary[] }>("/api/sessions");
+    setSessions(data.sessions);
+    return data.sessions;
+  }, []);
+
+  const selectSession = useCallback(async (sessionId: string) => {
+    setSelectedSessionId(sessionId);
+    setStreamingText("");
+    setPendingUserMessage("");
+    if (!sessionId) {
+      setSessionDetail(null);
+      return;
+    }
     setLoadingSessionDetail(true);
     try {
       const data = await getJson<{ session: SessionDetail }>(`/api/sessions/${sessionId}`);
       setSessionDetail(data.session);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : (locale === "zh" ? "加载会话详情失败" : "Failed to load session detail"));
+    } catch {
+      setSessionDetail(null);
     } finally {
       setLoadingSessionDetail(false);
     }
-  }, [locale]);
+  }, []);
 
+  // Initial load (mount only)
   useEffect(() => {
-    void loadSessions();
-  }, [loadSessions]);
-
-  useEffect(() => {
-    // Skip auto-reload while submitChat is handling its own session loading.
-    if (sendingChat) return;
-    if (selectedSessionId) void loadSessionDetail(selectedSessionId);
-    else setSessionDetail(null);
+    let cancelled = false;
+    (async () => {
+      setLoadingSessions(true);
+      try {
+        const list = await refreshSessionList();
+        if (!cancelled && list[0]) {
+          await selectSession(list[0].id);
+        }
+      } finally {
+        if (!cancelled) setLoadingSessions(false);
+      }
+    })();
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadSessionDetail, selectedSessionId]);
+  }, []);
 
   const filteredSessions = useMemo(() => {
     const query = sessionQuery.trim().toLowerCase();
@@ -739,7 +743,7 @@ export function HermesSessionsPage() {
         setSelectedSessionId("");
         setSessionDetail(null);
       }
-      await loadSessions();
+      await refreshSessionList();
       setStatusMessage(locale === "zh" ? (result.deletedIds.length > 1 ? `已删除会话分支（${result.deletedIds.length} 条）。` : "会话已删除。") : (result.deletedIds.length > 1 ? `Deleted session branch (${result.deletedIds.length} sessions).` : "Session deleted."));
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : (locale === "zh" ? "删除会话失败" : "Failed to delete session"));
@@ -758,6 +762,8 @@ export function HermesSessionsPage() {
   }
 
   async function submitChat(mode: "new" | "reply") {
+    if (submitLockRef.current) return;
+
     const prompt = composerText.trim();
     if (!prompt) {
       if (mode === "new") {
@@ -766,7 +772,9 @@ export function HermesSessionsPage() {
       return;
     }
 
-    // Record to history and reset navigation index
+    submitLockRef.current = true;
+
+    // Record to history
     const history = composerHistoryRef.current;
     if (history[history.length - 1] !== prompt) {
       history.push(prompt);
@@ -774,7 +782,7 @@ export function HermesSessionsPage() {
     composerHistoryIndexRef.current = -1;
     composerDraftRef.current = "";
 
-    // Immediately: clear composer and show the user's message in the chat area
+    // Show user's message immediately
     setComposerText("");
     setPendingUserMessage(prompt);
     setSendingChat(true);
@@ -786,8 +794,8 @@ export function HermesSessionsPage() {
     let resolvedSessionId = "";
 
     try {
+      // ── 1. Stream ──
       const payload = { prompt, sessionId: mode === "reply" ? selectedSessionId : undefined };
-
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -811,7 +819,6 @@ export function HermesSessionsPage() {
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-
         const parts = buffer.split("\n\n");
         buffer = parts.pop() ?? "";
 
@@ -819,7 +826,6 @@ export function HermesSessionsPage() {
           const lines = part.split("\n");
           let eventType = "";
           let eventData = "";
-
           for (const line of lines) {
             if (line.startsWith("event: ")) eventType = line.slice(7);
             else if (line.startsWith("data: ")) eventData = line.slice(6);
@@ -840,41 +846,31 @@ export function HermesSessionsPage() {
               resolvedSessionId = eventData;
               break;
             case "done": {
-              const doneData = JSON.parse(eventData) as { sessionId: string };
-              resolvedSessionId = doneData.sessionId || resolvedSessionId;
+              const d = JSON.parse(eventData) as { sessionId: string };
+              resolvedSessionId = d.sessionId || resolvedSessionId;
               break;
             }
             case "error":
-              // Don't throw — collect the error and continue reading
-              // (a "done" event may follow with a session_id for partial results).
               streamError = eventData;
               break;
           }
         }
       }
 
-      // If there was an error, surface it after the stream fully closes.
-      if (streamError) {
-        throw new Error(streamError);
-      }
+      if (streamError) throw new Error(streamError);
 
-      // Stream complete — try to load session detail from DB.
-      // Streaming text stays visible until DB data confirmed has messages.
+      // ── 2. Load session detail (blocking, no fire-and-forget) ──
       if (resolvedSessionId) {
-        try {
-          const data = await getJson<{ session: SessionDetail }>(`/api/sessions/${resolvedSessionId}`);
-          if (data.session?.messages?.length) {
-            setSelectedSessionId(resolvedSessionId);
-            setSessionDetail(data.session);
-            // DB has messages → safe to clear streaming UI
-            setStreamingText("");
-            setPendingUserMessage("");
-          }
-        } catch {
-          // DB load failed — streaming text stays visible as fallback
+        const data = await getJson<{ session: SessionDetail }>(`/api/sessions/${resolvedSessionId}`);
+        // Only replace streaming UI if DB actually has the messages
+        if (data.session?.messages?.length) {
+          setSelectedSessionId(resolvedSessionId);
+          setSessionDetail(data.session);
+          setStreamingText("");
+          setPendingUserMessage("");
         }
-        // Refresh session list (don't await — fire and forget)
-        void loadSessions(resolvedSessionId);
+        // Refresh session list (blocking — no race with anything after)
+        await refreshSessionList();
       }
 
       setStatusMessage(locale === "zh" ? (mode === "new" ? "新会话已创建。" : "当前会话已继续。") : (mode === "new" ? "New session created." : "Current session continued."));
@@ -889,6 +885,7 @@ export function HermesSessionsPage() {
     } finally {
       setSendingChat(false);
       setToolStatus("");
+      submitLockRef.current = false;
     }
   }
 
@@ -902,7 +899,7 @@ export function HermesSessionsPage() {
           <CardHeader className="flex items-start justify-between gap-2 pb-2">
             <SectionLabel icon={FolderTree} title={t("sessionsList")} description="" />
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" className="h-8 shrink-0" onClick={() => void loadSessions(selectedSessionId || undefined)} disabled={loadingSessions}>
+              <Button variant="outline" size="sm" className="h-8 shrink-0" onClick={() => void refreshSessionList()} disabled={loadingSessions}>
                 {loadingSessions ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}{t("refresh")}
               </Button>
               <Button
@@ -942,9 +939,7 @@ export function HermesSessionsPage() {
                           role="button"
                           tabIndex={0}
                           onClick={() => {
-                            setSelectedSessionId(session.id);
-                            setStreamingText("");
-                            setPendingUserMessage("");
+                            void selectSession(session.id);
                             if (children.length) {
                               setExpandedSessionIds((current) =>
                                 current.includes(session.id) ? current : [...current, session.id]
@@ -954,7 +949,7 @@ export function HermesSessionsPage() {
                           onKeyDown={(event) => {
                             if (event.key === "Enter" || event.key === " ") {
                               event.preventDefault();
-                              setSelectedSessionId(session.id);
+                              void selectSession(session.id);
                               if (children.length) {
                                 setExpandedSessionIds((current) =>
                                   current.includes(session.id) ? current : [...current, session.id]
@@ -1051,7 +1046,7 @@ export function HermesSessionsPage() {
                                 <div key={child.id} className="group/child relative">
                                   <button
                                     type="button"
-                                    onClick={() => setSelectedSessionId(child.id)}
+                                    onClick={() => void selectSession(child.id)}
                                     className={cn(
                                       "relative w-full overflow-hidden border px-1.5 py-1 text-left transition-all duration-150 before:absolute before:-left-[14px] before:top-1/2 before:h-px before:w-3 before:-translate-y-1/2 before:bg-border/70 before:content-['']",
                                       selectedSessionId === child.id

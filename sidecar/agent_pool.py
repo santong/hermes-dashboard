@@ -82,6 +82,29 @@ class AgentPool:
             self._agents.move_to_end(session_id)
             self._enforce_max_size()
 
+    def rekey(self, previous_session_id: str, new_session_id: str, agent: "_AIAgent") -> None:
+        """Move a cached agent from one session key to another.
+
+        Hermes can switch session IDs mid-run (for example after context
+        compression). When that happens, the pool must follow the new ID or
+        later lookups will either miss or, worse, reuse the agent under an
+        outdated parent-session key.
+        """
+        if previous_session_id == new_session_id:
+            self.register(new_session_id, agent)
+            return
+
+        with self._lock:
+            entry = self._agents.get(previous_session_id)
+            if entry is not None and entry.agent is agent:
+                del self._agents[previous_session_id]
+            else:
+                entry = _PoolEntry(agent=agent)
+
+            self._agents[new_session_id] = entry
+            self._agents.move_to_end(new_session_id)
+            self._enforce_max_size()
+
     @property
     def size(self) -> int:
         return len(self._agents)

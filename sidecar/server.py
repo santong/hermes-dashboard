@@ -9,7 +9,7 @@ import logging
 import os
 import sys
 from contextlib import contextmanager
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
@@ -75,6 +75,49 @@ class ChatRequest(BaseModel):
     sessionId: Optional[str] = None
 
 
+def load_conversation_history(agent: Any, session_id: Optional[str]) -> list[dict[str, Any]] | None:
+    """Restore persisted history for a resumed session.
+
+    The sidecar reuses AIAgent instances across HTTP requests, but Hermes'
+    persisted transcript still lives in SessionDB. Re-hydrating the history on
+    every resumed turn keeps context correct and prevents the agent's internal
+    DB flush cursor from skipping new messages.
+    """
+    if not session_id:
+        return None
+
+    session_db = getattr(agent, "_session_db", None)
+    if session_db is None:
+        logger.warning("Agent missing SessionDB while resuming session %s", session_id)
+        return None
+
+    try:
+        restored = session_db.get_messages_as_conversation(session_id) or []
+    except Exception as exc:
+        logger.warning("Failed to restore history for session %s: %s", session_id, exc)
+        return None
+
+    return [msg for msg in restored if msg.get("role") != "session_meta"]
+
+
+def run_agent_turn(agent: Any, prompt: str, requested_session_id: Optional[str], stream_cb) -> dict[str, Any]:
+    """Execute one chat turn with DB-backed history restoration."""
+    conversation_history = load_conversation_history(agent, requested_session_id)
+
+    if requested_session_id:
+        # SessionDB is the source of truth for already-persisted messages.
+        # Sync the flush cursor to that count before each resumed turn so the
+        # current request does not get treated as "already written".
+        setattr(agent, "_last_flushed_db_idx", len(conversation_history or []))
+
+    with suppress_stdout():
+        return agent.run_conversation(
+            prompt,
+            conversation_history=conversation_history,
+            stream_callback=stream_cb,
+        )
+
+
 @app.post("/chat")
 async def chat(body: ChatRequest, request: Request):
     pool = get_pool()
@@ -108,15 +151,13 @@ async def chat(body: ChatRequest, request: Request):
             if session_id:
                 await queue.put({"event": "session_id", "data": session_id})
 
-            def _run_chat():
-                with suppress_stdout():
-                    return agent.chat(prompt, stream_callback=stream_cb)
-
-            result = await asyncio.to_thread(_run_chat)
+            await asyncio.to_thread(run_agent_turn, agent, prompt, body.sessionId, stream_cb)
 
             session_id = getattr(agent, "session_id", "") or session_id
 
-            if not body.sessionId and session_id:
+            if body.sessionId and session_id and session_id != body.sessionId:
+                pool.rekey(body.sessionId, session_id, agent)
+            elif not body.sessionId and session_id:
                 pool.register(session_id, agent)
 
             await queue.put(
